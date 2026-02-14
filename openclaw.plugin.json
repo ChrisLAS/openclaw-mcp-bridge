@@ -35,6 +35,10 @@
           },
           "required": ["name", "url", "prefix"]
         }
+      },
+      "tokenDbPath": {
+        "type": "string",
+        "description": "Path to the SQLite token database (defaults to ~/.openclaw/mcp-bridge-tokens.db)"
       }
     },
     "required": ["servers"]

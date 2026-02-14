@@ -1,6 +1,7 @@
 import { DEFAULT_MCP_PATH, type ServerConfig } from "./config.js";
 import type { McpToolDefinition } from "./discovery.js";
 import { parseSseResponse } from "./sse.js";
+import type { TokenStore } from "./token-store.js";
 
 /** Timeout for tools/call requests (30 seconds) */
 const EXECUTE_TIMEOUT_MS = 30_000;
@@ -9,14 +10,78 @@ const EXECUTE_TIMEOUT_MS = 30_000;
 // We use a structural type to avoid importing the full openclaw dependency.
 export type BridgedTool = {
   name: string;
-  label?: string;
+  label: string;
   description: string;
   parameters: Record<string, unknown>;
   execute: (
     toolCallId: string,
     params: Record<string, unknown>,
-  ) => Promise<{ content: Array<{ type: string; text: string }>; details?: unknown }>;
+    signal?: AbortSignal,
+  ) => Promise<{ content: Array<{ type: string; text: string }>; details: unknown }>;
 };
+
+/**
+ * Options for token resolution at execute() time.
+ */
+export type TokenResolutionOptions = {
+  /** Telegram user ID parsed from the session key, if available */
+  userId?: string;
+  /** Token store for per-user token lookup */
+  tokenStore?: TokenStore;
+  /** Service name (server prefix) used as the key in the token store */
+  service: string;
+};
+
+/**
+ * Resolve the bearer token to use for a tool call.
+ *
+ * Priority:
+ * 1. Per-user token from the token store (if userId + store are available)
+ * 2. Hardcoded token from server config (Phase A backwards compat)
+ * 3. undefined (no token available)
+ *
+ * Returns { token, error } where error is set if a user-specific token
+ * was expected but not found or expired.
+ */
+function resolveToken(
+  server: ServerConfig,
+  opts: TokenResolutionOptions,
+): { token: string | undefined; error: string | undefined } {
+  // Try per-user token first
+  if (opts.userId && opts.tokenStore) {
+    const record = opts.tokenStore.getToken(opts.userId, opts.service);
+    if (record) {
+      if (opts.tokenStore.isExpired(record)) {
+        return {
+          token: undefined,
+          error:
+            `Your ${opts.service} token has expired. ` +
+            `Please run /connect ${opts.service} to re-authenticate.`,
+        };
+      }
+      return { token: record.access_token, error: undefined };
+    }
+  }
+
+  // Fall back to hardcoded server config token (Phase A compat)
+  if (server.token) {
+    return { token: server.token, error: undefined };
+  }
+
+  // No token available anywhere
+  if (opts.userId && opts.tokenStore) {
+    // We have the infrastructure but no token stored — prompt the user
+    return {
+      token: undefined,
+      error:
+        `No ${opts.service} token found for your account. ` +
+        `Please run /connect ${opts.service} to authenticate.`,
+    };
+  }
+
+  // No token store, no config token — proceed without auth (server may not need it)
+  return { token: undefined, error: undefined };
+}
 
 /**
  * Create an OpenClaw-compatible tool that bridges calls to an MCP server.
@@ -26,11 +91,13 @@ export type BridgedTool = {
  * @param server   Server configuration
  * @param mcpTool  Tool definition from discovery
  * @param sessionId  Optional MCP session ID captured during discovery
+ * @param tokenOpts  Optional token resolution options for per-user tokens
  */
 export function createBridgedTool(
   server: ServerConfig,
   mcpTool: McpToolDefinition,
   sessionId?: string,
+  tokenOpts?: TokenResolutionOptions,
 ): BridgedTool {
   const prefixedName = `${server.prefix}_${mcpTool.name}`;
   const endpoint = `${server.url}${server.path ?? DEFAULT_MCP_PATH}`;
@@ -40,7 +107,20 @@ export function createBridgedTool(
     label: `${server.name}: ${mcpTool.name}`,
     description: mcpTool.description ?? `Call ${mcpTool.name} on ${server.name} MCP server`,
     parameters: mcpTool.inputSchema ?? { type: "object", properties: {} },
-    async execute(toolCallId, params) {
+    async execute(toolCallId, params, signal) {
+      // Resolve token at execute() time (not at factory time) so that
+      // tokens added/refreshed between tool calls are picked up
+      const { token, error } = tokenOpts
+        ? resolveToken(server, tokenOpts)
+        : { token: server.token, error: undefined };
+
+      if (error) {
+        return {
+          content: [{ type: "text", text: error }],
+          details: null,
+        };
+      }
+
       const body = JSON.stringify({
         jsonrpc: "2.0",
         method: "tools/call",
@@ -55,8 +135,8 @@ export function createBridgedTool(
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
       };
-      if (server.token) {
-        headers["Authorization"] = `Bearer ${server.token}`;
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
       }
       if (sessionId) {
         headers["Mcp-Session-Id"] = sessionId;
@@ -66,7 +146,7 @@ export function createBridgedTool(
         method: "POST",
         headers,
         body,
-        signal: AbortSignal.timeout(EXECUTE_TIMEOUT_MS),
+        signal: signal ?? AbortSignal.timeout(EXECUTE_TIMEOUT_MS),
       });
 
       if (!response.ok) {
@@ -82,6 +162,7 @@ export function createBridgedTool(
               }),
             },
           ],
+          details: null,
         };
       }
 
@@ -104,6 +185,7 @@ export function createBridgedTool(
               }),
             },
           ],
+          details: null,
         };
       }
 
@@ -119,6 +201,7 @@ export function createBridgedTool(
               }),
             },
           ],
+          details: null,
         };
       }
 
@@ -131,6 +214,7 @@ export function createBridgedTool(
       if (mcpContent === null || mcpContent === undefined) {
         return {
           content: [{ type: "text", text: "(no content returned)" }],
+          details: null,
         };
       }
 

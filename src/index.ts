@@ -1,7 +1,36 @@
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { parseBridgeConfig } from "./config.js";
 import { discoverToolsSync } from "./discovery.js";
-import { createBridgedTool } from "./bridge.js";
+import { createBridgedTool, type BridgedTool } from "./bridge.js";
+import type { TokenResolutionOptions } from "./bridge.js";
 import { sanitizeUrlForLog } from "./util.js";
+import { TokenStore } from "./token-store.js";
+import { parseTelegramUserId } from "./session.js";
+
+/** Default path for the SQLite token database */
+const DEFAULT_TOKEN_DB_PATH = join(homedir(), ".openclaw", "mcp-bridge-tokens.db");
+
+/**
+ * Context provided by OpenClaw to tool factories.
+ * Mirrors OpenClawPluginToolContext from the OpenClaw source.
+ */
+type OpenClawPluginToolContext = {
+  config?: Record<string, unknown>;
+  workspaceDir?: string;
+  agentDir?: string;
+  agentId?: string;
+  sessionKey?: string;
+  messageChannel?: string;
+  agentAccountId?: string;
+  sandboxed?: boolean;
+};
+
+/**
+ * A tool factory receives context about the current session
+ * and returns a BridgedTool (or null to skip registration).
+ */
+type OpenClawPluginToolFactory = (ctx: OpenClawPluginToolContext) => BridgedTool | null;
 
 type PluginApi = {
   pluginConfig?: Record<string, unknown>;
@@ -25,6 +54,19 @@ const plugin = {
     if (config.servers.length === 0) {
       api.logger.warn("[mcp-bridge] No servers configured. Add servers to plugin config.");
       return;
+    }
+
+    // Initialize the token store (synchronous — safe in register())
+    const dbPath = config.tokenDbPath ?? DEFAULT_TOKEN_DB_PATH;
+    let tokenStore: TokenStore | undefined;
+    try {
+      tokenStore = new TokenStore(dbPath);
+      api.logger.info(`[mcp-bridge] Token store initialized at ${dbPath}`);
+    } catch (err) {
+      api.logger.warn(
+        `[mcp-bridge] Failed to initialize token store at ${dbPath}: ${err instanceof Error ? err.message : String(err)}. ` +
+        `Per-user tokens will be unavailable; falling back to config tokens only.`,
+      );
     }
 
     let totalTools = 0;
@@ -51,19 +93,33 @@ const plugin = {
       api.logger.info(`[mcp-bridge] ${server.name}: found ${mcpTools.length} tools`);
 
       for (const mcpTool of mcpTools) {
-        const bridged = createBridgedTool(server, mcpTool, sessionId);
+        const prefixedName = `${server.prefix}_${mcpTool.name}`;
 
         // Warn on tool name collision (e.g. two servers with same prefix exposing same tool)
-        if (registeredNames.has(bridged.name)) {
+        if (registeredNames.has(prefixedName)) {
           api.logger.warn(
-            `[mcp-bridge] Tool name collision: "${bridged.name}" is already registered. ` +
+            `[mcp-bridge] Tool name collision: "${prefixedName}" is already registered. ` +
             `The duplicate from "${server.name}" will overwrite the previous registration.`,
           );
         }
-        registeredNames.add(bridged.name);
+        registeredNames.add(prefixedName);
 
-        api.registerTool(bridged);
-        api.logger.info(`[mcp-bridge]   registered: ${bridged.name}`);
+        // Register a factory function. OpenClaw calls this once per agent session
+        // with context about who is calling, letting us resolve per-user tokens.
+        const factory: OpenClawPluginToolFactory = (ctx: OpenClawPluginToolContext) => {
+          const userId = parseTelegramUserId(ctx.sessionKey);
+
+          const tokenOpts: TokenResolutionOptions = {
+            userId,
+            tokenStore,
+            service: server.prefix,
+          };
+
+          return createBridgedTool(server, mcpTool, sessionId, tokenOpts);
+        };
+
+        api.registerTool(factory);
+        api.logger.info(`[mcp-bridge]   registered: ${prefixedName}`);
         totalTools++;
       }
     }
