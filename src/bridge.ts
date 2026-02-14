@@ -10,13 +10,14 @@ const EXECUTE_TIMEOUT_MS = 30_000;
 // We use a structural type to avoid importing the full openclaw dependency.
 export type BridgedTool = {
   name: string;
-  label?: string;
+  label: string;
   description: string;
   parameters: Record<string, unknown>;
   execute: (
     toolCallId: string,
     params: Record<string, unknown>,
-  ) => Promise<{ content: Array<{ type: string; text: string }>; details?: unknown }>;
+    signal?: AbortSignal,
+  ) => Promise<{ content: Array<{ type: string; text: string }>; details: unknown }>;
 };
 
 /**
@@ -106,7 +107,7 @@ export function createBridgedTool(
     label: `${server.name}: ${mcpTool.name}`,
     description: mcpTool.description ?? `Call ${mcpTool.name} on ${server.name} MCP server`,
     parameters: mcpTool.inputSchema ?? { type: "object", properties: {} },
-    async execute(toolCallId, params) {
+    async execute(toolCallId, params, signal) {
       // Resolve token at execute() time (not at factory time) so that
       // tokens added/refreshed between tool calls are picked up
       const { token, error } = tokenOpts
@@ -116,6 +117,7 @@ export function createBridgedTool(
       if (error) {
         return {
           content: [{ type: "text", text: error }],
+          details: null,
         };
       }
 
@@ -144,7 +146,7 @@ export function createBridgedTool(
         method: "POST",
         headers,
         body,
-        signal: AbortSignal.timeout(EXECUTE_TIMEOUT_MS),
+        signal: signal ?? AbortSignal.timeout(EXECUTE_TIMEOUT_MS),
       });
 
       if (!response.ok) {
@@ -160,6 +162,7 @@ export function createBridgedTool(
               }),
             },
           ],
+          details: null,
         };
       }
 
@@ -182,6 +185,7 @@ export function createBridgedTool(
               }),
             },
           ],
+          details: null,
         };
       }
 
@@ -197,6 +201,7 @@ export function createBridgedTool(
               }),
             },
           ],
+          details: null,
         };
       }
 
@@ -209,6 +214,7 @@ export function createBridgedTool(
       if (mcpContent === null || mcpContent === undefined) {
         return {
           content: [{ type: "text", text: "(no content returned)" }],
+          details: null,
         };
       }
 
