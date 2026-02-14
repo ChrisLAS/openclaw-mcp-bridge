@@ -1,5 +1,6 @@
 import type { ServerConfig } from "./config.js";
 import type { McpToolDefinition } from "./discovery.js";
+import { parseSseResponse } from "./sse.js";
 
 // Minimal AgentTool shape matching @mariozechner/pi-agent-core.
 // We use a structural type to avoid importing the full openclaw dependency.
@@ -43,6 +44,7 @@ export function createBridgedTool(
 
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
       };
       if (server.token) {
         headers["Authorization"] = `Bearer ${server.token}`;
@@ -70,7 +72,10 @@ export function createBridgedTool(
         };
       }
 
-      const result = await response.json();
+      // Response may be SSE format (event: message\ndata: {...}) or plain JSON
+      const rawText = await response.text();
+      const jsonStr = parseSseResponse(rawText);
+      const result = JSON.parse(jsonStr);
 
       if (result.error) {
         return {

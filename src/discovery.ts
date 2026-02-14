@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import type { ServerConfig } from "./config.js";
+import { parseSseResponse } from "./sse.js";
 
 export type McpToolDefinition = {
   name: string;
@@ -18,7 +19,10 @@ export function discoverToolsSync(server: ServerConfig): McpToolDefinition[] {
     id: 1,
   });
 
-  const headers = ["Content-Type: application/json"];
+  const headers = [
+    "Content-Type: application/json",
+    "Accept: application/json, text/event-stream",
+  ];
   if (server.token) {
     headers.push(`Authorization: Bearer ${server.token}`);
   }
@@ -34,7 +38,8 @@ export function discoverToolsSync(server: ServerConfig): McpToolDefinition[] {
       encoding: "utf-8",
       timeout: 15_000,
     });
-    const response = JSON.parse(raw);
+    const jsonStr = parseSseResponse(raw);
+    const response = JSON.parse(jsonStr);
     if (response.error) {
       throw new Error(
         `MCP error: ${response.error.message ?? JSON.stringify(response.error)}`,
@@ -42,7 +47,7 @@ export function discoverToolsSync(server: ServerConfig): McpToolDefinition[] {
     }
     const tools = response.result?.tools;
     if (!Array.isArray(tools)) {
-      throw new Error(`Unexpected tools/list response: ${raw.slice(0, 200)}`);
+      throw new Error(`Unexpected tools/list response: ${jsonStr.slice(0, 200)}`);
     }
     return tools as McpToolDefinition[];
   } catch (err) {
