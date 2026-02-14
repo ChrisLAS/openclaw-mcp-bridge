@@ -2,6 +2,12 @@ import type { ServerConfig } from "./config.js";
 import type { McpToolDefinition } from "./discovery.js";
 import { parseSseResponse } from "./sse.js";
 
+/** Default MCP endpoint path */
+const DEFAULT_MCP_PATH = "/mcp";
+
+/** Timeout for tools/call requests (30 seconds) */
+const EXECUTE_TIMEOUT_MS = 30_000;
+
 // Minimal AgentTool shape matching @mariozechner/pi-agent-core.
 // We use a structural type to avoid importing the full openclaw dependency.
 export type BridgedTool = {
@@ -19,12 +25,18 @@ export type BridgedTool = {
  * Create an OpenClaw-compatible tool that bridges calls to an MCP server.
  *
  * Tool name is prefixed: e.g. prefix="notion", mcpTool.name="search" -> "notion_search"
+ *
+ * @param server   Server configuration
+ * @param mcpTool  Tool definition from discovery
+ * @param sessionId  Optional MCP session ID captured during discovery
  */
 export function createBridgedTool(
   server: ServerConfig,
   mcpTool: McpToolDefinition,
+  sessionId?: string,
 ): BridgedTool {
   const prefixedName = `${server.prefix}_${mcpTool.name}`;
+  const endpoint = `${server.url}${server.path ?? DEFAULT_MCP_PATH}`;
 
   return {
     name: prefixedName,
@@ -49,11 +61,15 @@ export function createBridgedTool(
       if (server.token) {
         headers["Authorization"] = `Bearer ${server.token}`;
       }
+      if (sessionId) {
+        headers["Mcp-Session-Id"] = sessionId;
+      }
 
-      const response = await fetch(`${server.url}/mcp`, {
+      const response = await fetch(endpoint, {
         method: "POST",
         headers,
         body,
+        signal: AbortSignal.timeout(EXECUTE_TIMEOUT_MS),
       });
 
       if (!response.ok) {
@@ -72,19 +88,37 @@ export function createBridgedTool(
         };
       }
 
-      // Response may be SSE format (event: message\ndata: {...}) or plain JSON
-      const rawText = await response.text();
-      const jsonStr = parseSseResponse(rawText);
-      const result = JSON.parse(jsonStr);
-
-      if (result.error) {
+      // Response may be SSE format (event: message\ndata: {...}) or plain JSON.
+      // Wrap parsing in try/catch — the server may return malformed body,
+      // HTML error pages, or truncated SSE even with a 200 status.
+      let result: Record<string, unknown>;
+      try {
+        const rawText = await response.text();
+        const jsonStr = parseSseResponse(rawText);
+        result = JSON.parse(jsonStr);
+      } catch (parseErr) {
         return {
           content: [
             {
               type: "text",
               text: JSON.stringify({
                 error: true,
-                message: result.error.message ?? JSON.stringify(result.error),
+                message: `Failed to parse MCP response: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+              }),
+            },
+          ],
+        };
+      }
+
+      if (result.error) {
+        const errObj = result.error as Record<string, unknown>;
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error: true,
+                message: errObj.message ?? JSON.stringify(errObj),
               }),
             },
           ],
@@ -92,8 +126,17 @@ export function createBridgedTool(
       }
 
       // MCP tools/call returns result.content (array of content blocks)
-      // or result.result for some implementations
-      const mcpContent = result.result?.content ?? result.result;
+      // or result.result for some implementations.
+      // Guard against result.result being undefined (missing entirely).
+      const resultObj = result.result as Record<string, unknown> | undefined;
+      const mcpContent = resultObj?.content ?? resultObj ?? null;
+
+      if (mcpContent === null || mcpContent === undefined) {
+        return {
+          content: [{ type: "text", text: "(no content returned)" }],
+        };
+      }
+
       const payload =
         typeof mcpContent === "string"
           ? mcpContent

@@ -4,12 +4,15 @@
   "description": "OpenClaw plugin that bridges MCP HTTP servers as native agent tools",
   "type": "module",
   "openclaw": {
-    "extensions": ["./src/index.ts"]
+    "extensions": [
+      "./src/index.ts"
+    ]
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@types/node": "^25.2.3",
     "typescript": "^5.7.0"
   }
 }

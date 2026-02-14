@@ -27,6 +27,10 @@
             "token": {
               "type": "string",
               "description": "Bearer token for authentication"
+            },
+            "path": {
+              "type": "string",
+              "description": "MCP endpoint path (defaults to '/mcp')"
             }
           },
           "required": ["name", "url", "prefix"]
