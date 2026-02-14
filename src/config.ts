@@ -1,3 +1,6 @@
+/** Default MCP endpoint path */
+export const DEFAULT_MCP_PATH = "/mcp";
+
 export type ServerConfig = {
   /** Human-readable server name */
   name: string;

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import type { ServerConfig } from "./config.js";
+import { DEFAULT_MCP_PATH, type ServerConfig } from "./config.js";
 import { parseSseResponse } from "./sse.js";
 import { sanitizeUrlForLog } from "./util.js";
 
@@ -15,16 +15,16 @@ export type DiscoveryResult = {
   sessionId?: string;
 };
 
-/** Default MCP endpoint path */
-const DEFAULT_MCP_PATH = "/mcp";
-
 /**
  * Verify that curl is available on the system.
  * Throws a descriptive error if it is not found.
  */
+let curlChecked = false;
 function assertCurlAvailable(): void {
+  if (curlChecked) return;
   try {
     execFileSync("curl", ["--version"], { encoding: "utf-8", timeout: 5_000 });
+    curlChecked = true;
   } catch {
     throw new Error(
       "curl is not available on this system. " +
@@ -142,6 +142,17 @@ export function discoverToolsSync(server: ServerConfig): DiscoveryResult {
       }
     } catch {
       // initialize response couldn't be parsed — continue to tools/list
+    }
+
+    // Send notifications/initialized (required by MCP spec after initialize)
+    const initializedBody = JSON.stringify({
+      jsonrpc: "2.0",
+      method: "notifications/initialized",
+    });
+    try {
+      curlPost(endpoint, baseHeaders, initializedBody, sessionId);
+    } catch {
+      // Best-effort — some servers don't require this notification
     }
 
     // --- Step 2: tools/list with pagination ---

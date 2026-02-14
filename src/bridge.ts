@@ -1,9 +1,6 @@
-import type { ServerConfig } from "./config.js";
+import { DEFAULT_MCP_PATH, type ServerConfig } from "./config.js";
 import type { McpToolDefinition } from "./discovery.js";
 import { parseSseResponse } from "./sse.js";
-
-/** Default MCP endpoint path */
-const DEFAULT_MCP_PATH = "/mcp";
 
 /** Timeout for tools/call requests (30 seconds) */
 const EXECUTE_TIMEOUT_MS = 30_000;
