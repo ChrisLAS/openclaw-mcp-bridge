@@ -16,6 +16,8 @@ export type ServerConfig = {
 
 export type BridgeConfig = {
   servers: ServerConfig[];
+  /** Path to the SQLite token database (defaults to ~/.openclaw/mcp-bridge-tokens.db) */
+  tokenDbPath?: string;
 };
 
 export type ParseResult = {
@@ -62,5 +64,7 @@ export function parseBridgeConfig(raw: Record<string, unknown> | undefined): Par
       path: typeof s.path === "string" ? s.path : undefined,
     });
   }
-  return { config: { servers }, warnings };
+  const tokenDbPath = typeof raw.tokenDbPath === "string" ? raw.tokenDbPath : undefined;
+
+  return { config: { servers, tokenDbPath }, warnings };
 }
