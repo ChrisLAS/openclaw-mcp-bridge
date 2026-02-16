@@ -7,6 +7,8 @@ import type { TokenResolutionOptions } from "./bridge.js";
 import { sanitizeUrlForLog } from "./util.js";
 import { TokenStore } from "./token-store.js";
 import { parseTelegramUserId } from "./session.js";
+import { BillingClient } from "./billing.js";
+import { createTierGateHooks } from "./tier-gate.js";
 
 /** Default path for the SQLite token database */
 const DEFAULT_TOKEN_DB_PATH = join(homedir(), ".openclaw", "mcp-bridge-tokens.db");
@@ -36,6 +38,9 @@ type PluginApi = {
   pluginConfig?: Record<string, unknown>;
   logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void };
   registerTool: (tool: unknown) => void;
+  /** Register a lifecycle hook handler (mirrors OpenClawPluginApi.on) */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  on: (hookName: string, handler: (...args: any[]) => any, opts?: { priority?: number }) => void;
 };
 
 const plugin = {
@@ -125,6 +130,30 @@ const plugin = {
     }
 
     api.logger.info(`[mcp-bridge] Total: ${totalTools} tools registered from ${config.servers.length} server(s)`);
+
+    // ========================================================================
+    // Tier-based service gating hooks
+    // ========================================================================
+
+    const billingApiUrl = process.env.BILLING_API_URL ?? "http://pal-e-billing:8004";
+    const billingApiKey = process.env.BILLING_API_KEY;
+
+    if (billingApiKey) {
+      const billingClient = new BillingClient(billingApiUrl, billingApiKey, api.logger);
+      const { beforeAgentStart, beforeToolCall } = createTierGateHooks(billingClient, api.logger);
+
+      api.on("before_agent_start", beforeAgentStart);
+      api.on("before_tool_call", beforeToolCall);
+
+      api.logger.info(
+        `[tier-gate] Tier gating enabled (billing API: ${billingApiUrl})`,
+      );
+    } else {
+      api.logger.warn(
+        "[tier-gate] BILLING_API_KEY not set. Tier-based service gating is disabled. " +
+        "All services will be available to all users.",
+      );
+    }
   },
 };
 
