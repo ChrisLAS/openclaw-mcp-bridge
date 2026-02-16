@@ -2,8 +2,9 @@
  * Tier-based service gating hooks for OpenClaw.
  *
  * Enforces per-user subscription tiers by querying the pal-e-billing API:
+ * Tiers: Free (Notion + LinkedIn, token-limited), Pro ($50/mo, + Gmail + GCal), Custom (by appointment)
  * - before_agent_start: injects tier-appropriate service context into the system prompt
- * - before_tool_call: blocks gated tool calls (sessions_spawn to gated agents + direct gmail/gcal tool calls)
+ * - before_tool_call: blocks gmail/gcal tool calls for free-tier users
  */
 
 import { BillingClient, type BillingStatus } from "./billing.js";
@@ -74,12 +75,14 @@ function buildServiceContext(status: BillingStatus | undefined, failOpen: boolea
     );
   }
 
-  // Unknown user or inactive subscription: treat as base tier
-  if (!status || !status.is_active || status.tier === "base") {
+  // Free tier: no subscription, inactive, or explicitly base/none tier
+  // Free users get Notion + LinkedIn with token limits (enforced separately)
+  if (!status || !status.is_active || status.tier === "base" || status.tier === "none") {
     return (
-      "Your available services for this user: Notion and LinkedIn only. " +
+      "Your available services for this user (Free tier): Notion and LinkedIn only. " +
       "Do NOT offer or mention Gmail or Calendar. " +
-      "If the user asks about Gmail or Calendar, explain that these require the Pro subscription."
+      "If the user asks about Gmail or Calendar, explain that these require the Pro subscription ($50/mo). " +
+      "Mention they can upgrade at " + BILLING_URL
     );
   }
 
@@ -108,9 +111,9 @@ function buildServiceContext(status: BillingStatus | undefined, failOpen: boolea
     );
   }
 
-  // Unknown tier: treat as base
+  // Unknown tier: treat as free
   return (
-    "Your available services for this user: Notion and LinkedIn only. " +
+    "Your available services for this user (Free tier): Notion and LinkedIn only. " +
     "Do NOT offer or mention Gmail or Calendar."
   );
 }
@@ -201,8 +204,8 @@ export function createTierGateHooks(billing: BillingClient, logger: TierGateLogg
 
     const status = result.status;
 
-    // No status or inactive: block
-    if (!status || !status.is_active || status.tier === "base") {
+    // Free tier (no subscription, inactive, base, or none): block gated tools
+    if (!status || !status.is_active || status.tier === "base" || status.tier === "none") {
       logger.info(
         `[tier-gate] Blocked ${gatedLabel} for user ${userId} (tier: ${status?.tier ?? "none"})`,
       );
