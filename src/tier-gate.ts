@@ -214,8 +214,13 @@ export function createTierGateHooks(billing: BillingClient, logger: TierGateLogg
       };
     }
 
-    // Pro tier but not active
-    if (status.tier === "pro" && status.gcal_gmail_status !== "active") {
+    // Pro tier with active gcal_gmail: allow through
+    if (status.tier === "pro" && status.gcal_gmail_status === "active") {
+      return;
+    }
+
+    // Pro tier but gcal_gmail not yet active (pending, null, etc.)
+    if (status.tier === "pro") {
       logger.info(
         `[tier-gate] Blocked ${gatedLabel} for user ${userId} (gcal_gmail_status: ${status.gcal_gmail_status})`,
       );
@@ -227,7 +232,16 @@ export function createTierGateHooks(billing: BillingClient, logger: TierGateLogg
       };
     }
 
-    // Pro tier with active gcal_gmail: allow through
+    // Unknown tier: block (fail-closed — consistent with buildServiceContext)
+    logger.info(
+      `[tier-gate] Blocked ${gatedLabel} for user ${userId} (unknown tier: ${status.tier})`,
+    );
+    return {
+      block: true,
+      blockReason:
+        `Gmail and Calendar require the Pro subscription ($50/mo). ` +
+        `Upgrade at ${BILLING_URL}`,
+    };
   }
 
   return { beforeAgentStart, beforeToolCall };

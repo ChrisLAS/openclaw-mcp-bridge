@@ -115,7 +115,7 @@ export class BillingClient {
 
       // Validate required fields to avoid caching garbage
       const obj = body as Record<string, unknown>;
-      if (typeof obj.is_active !== "boolean" || typeof obj.tier !== "string") {
+      if (typeof obj.is_active !== "boolean" || typeof obj.tier !== "string" || typeof obj.status !== "string") {
         this.logger.warn(
           `[tier-gate] Billing API returned malformed body for user ${telegramUserId}`,
         );
@@ -140,7 +140,8 @@ export class BillingClient {
 
     const now = Date.now();
     for (const [key, entry] of this.cache) {
-      if (now - entry.fetchedAt >= CACHE_TTL_MS) {
+      const ttl = entry.status === NOT_FOUND_STATUS ? NEGATIVE_CACHE_TTL_MS : CACHE_TTL_MS;
+      if (now - entry.fetchedAt >= ttl) {
         this.cache.delete(key);
       }
     }
