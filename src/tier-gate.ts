@@ -1,0 +1,228 @@
+/**
+ * Tier-based service gating hooks for OpenClaw.
+ *
+ * Enforces per-user subscription tiers by querying the pal-e-billing API:
+ * - before_agent_start: injects tier-appropriate service context into the system prompt
+ * - before_tool_call: blocks sessions_spawn calls to gated agents for base-tier users
+ */
+
+import { BillingClient, type BillingStatus } from "./billing.js";
+import { parseTelegramUserId } from "./session.js";
+
+/** Billing upgrade URL shown to users */
+const BILLING_URL = "https://ldraney.github.io/pal-e/billing";
+
+/** Agent names that require Pro tier */
+const GATED_AGENTS = new Set(["gmail-agent", "gcal-agent"]);
+
+type TierGateLogger = {
+  info: (msg: string) => void;
+  warn: (msg: string) => void;
+  error: (msg: string) => void;
+};
+
+/** Hook context provided by OpenClaw */
+type AgentHookContext = {
+  agentId?: string;
+  sessionKey?: string;
+  workspaceDir?: string;
+  messageProvider?: string;
+};
+
+type BeforeAgentStartEvent = {
+  prompt: string;
+  messages?: unknown[];
+};
+
+type BeforeAgentStartResult = {
+  systemPrompt?: string;
+  prependContext?: string;
+};
+
+type ToolHookContext = {
+  agentId?: string;
+  sessionKey?: string;
+  toolName: string;
+};
+
+type BeforeToolCallEvent = {
+  toolName: string;
+  params: Record<string, unknown>;
+};
+
+type BeforeToolCallResult = {
+  params?: Record<string, unknown>;
+  block?: boolean;
+  blockReason?: string;
+};
+
+/**
+ * Build the prependContext string based on a user's billing status.
+ *
+ * This is injected into the system prompt so the LLM knows which
+ * services are available for the current user.
+ */
+function buildServiceContext(status: BillingStatus | undefined): string {
+  // Unknown user or inactive subscription: treat as base tier
+  if (!status || !status.is_active || status.tier === "base") {
+    return (
+      "Your available services for this user: Notion and LinkedIn only. " +
+      "Do NOT offer or mention Gmail or Calendar. " +
+      "If the user asks about Gmail or Calendar, explain that these require the Pro subscription."
+    );
+  }
+
+  // Pro tier
+  if (status.tier === "pro") {
+    if (status.gcal_gmail_status === "active") {
+      return (
+        "Your available services for this user: Notion, LinkedIn, Gmail, and Calendar. " +
+        "All services are active and ready to use."
+      );
+    }
+
+    if (status.gcal_gmail_status === "pending") {
+      return (
+        "Your available services for this user: Notion and LinkedIn. " +
+        "Gmail and Calendar are being activated (within 24 hours). " +
+        "If the user asks about Gmail or Calendar, let them know activation is in progress."
+      );
+    }
+
+    // Pro tier but gcal_gmail_status is something else (null, error, etc.)
+    return (
+      "Your available services for this user: Notion and LinkedIn. " +
+      "Gmail and Calendar setup may be incomplete. " +
+      "If the user asks about Gmail or Calendar, suggest they contact support."
+    );
+  }
+
+  // Unknown tier: treat as base
+  return (
+    "Your available services for this user: Notion and LinkedIn only. " +
+    "Do NOT offer or mention Gmail or Calendar."
+  );
+}
+
+/**
+ * Create tier-gating hook handlers.
+ *
+ * Returns the two hook handler functions to be registered with api.on().
+ */
+export function createTierGateHooks(billing: BillingClient, logger: TierGateLogger) {
+  /**
+   * before_agent_start hook.
+   *
+   * Looks up the user's subscription tier and injects service availability
+   * context into the system prompt via prependContext.
+   */
+  async function beforeAgentStart(
+    _event: BeforeAgentStartEvent,
+    ctx: AgentHookContext,
+  ): Promise<BeforeAgentStartResult | void> {
+    const userId = parseTelegramUserId(ctx.sessionKey);
+    if (!userId) {
+      // Not a Telegram DM — skip tier gating (allow everything)
+      return;
+    }
+
+    const status = await billing.getStatus(userId);
+    const context = buildServiceContext(status);
+
+    logger.info(
+      `[tier-gate] User ${userId}: tier=${status?.tier ?? "unknown"}, ` +
+      `gcal_gmail=${status?.gcal_gmail_status ?? "n/a"}`,
+    );
+
+    return { prependContext: context };
+  }
+
+  /**
+   * before_tool_call hook.
+   *
+   * Intercepts sessions_spawn calls that target gated agents (gmail-agent,
+   * gcal-agent) and blocks them if the user's tier doesn't allow it.
+   */
+  async function beforeToolCall(
+    event: BeforeToolCallEvent,
+    ctx: ToolHookContext,
+  ): Promise<BeforeToolCallResult | void> {
+    // Only intercept sessions_spawn tool calls
+    if (event.toolName !== "sessions_spawn") {
+      return;
+    }
+
+    // Extract target agent from params
+    const targetAgent = extractTargetAgent(event.params);
+    if (!targetAgent || !GATED_AGENTS.has(targetAgent)) {
+      // Not targeting a gated agent — allow through
+      return;
+    }
+
+    const userId = parseTelegramUserId(ctx.sessionKey);
+    if (!userId) {
+      // Not a Telegram DM — allow through
+      return;
+    }
+
+    const status = await billing.getStatus(userId);
+
+    // No status or inactive: block
+    if (!status || !status.is_active || status.tier === "base") {
+      logger.info(
+        `[tier-gate] Blocked ${targetAgent} for user ${userId} (tier: ${status?.tier ?? "none"})`,
+      );
+      return {
+        block: true,
+        blockReason:
+          `Gmail and Calendar require the Pro subscription ($50/mo). ` +
+          `Upgrade at ${BILLING_URL}`,
+      };
+    }
+
+    // Pro tier but not active
+    if (status.tier === "pro" && status.gcal_gmail_status !== "active") {
+      logger.info(
+        `[tier-gate] Blocked ${targetAgent} for user ${userId} (gcal_gmail_status: ${status.gcal_gmail_status})`,
+      );
+      return {
+        block: true,
+        blockReason:
+          "Gmail and Calendar are being activated. " +
+          "You'll receive a confirmation within 24 hours.",
+      };
+    }
+
+    // Pro tier with active gcal_gmail: allow through
+  }
+
+  return { beforeAgentStart, beforeToolCall };
+}
+
+/**
+ * Extract the target agent name from sessions_spawn params.
+ *
+ * The params shape depends on OpenClaw's sessions_spawn tool definition.
+ * Common patterns: { agent: "gmail-agent" } or { agentId: "gmail-agent" }
+ */
+function extractTargetAgent(params: Record<string, unknown>): string | undefined {
+  if (typeof params.agent === "string") {
+    return params.agent;
+  }
+  if (typeof params.agentId === "string") {
+    return params.agentId;
+  }
+  // Some implementations use "name"
+  if (typeof params.name === "string") {
+    return params.name;
+  }
+  return undefined;
+}
+
+/** Exported for testing */
+export const __testing = {
+  buildServiceContext,
+  extractTargetAgent,
+  GATED_AGENTS,
+  BILLING_URL,
+};
