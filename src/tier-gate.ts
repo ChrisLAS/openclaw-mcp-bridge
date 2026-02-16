@@ -62,7 +62,15 @@ type BeforeToolCallResult = {
  * This is injected into the system prompt so the LLM knows which
  * services are available for the current user.
  */
-function buildServiceContext(status: BillingStatus | undefined): string {
+function buildServiceContext(status: BillingStatus | undefined, failOpen: boolean): string {
+  // Billing API unreachable — fail open, don't restrict services
+  if (failOpen) {
+    return (
+      "Your available services for this user: Notion, LinkedIn, Gmail, and Calendar. " +
+      "All services are available (billing status could not be verified)."
+    );
+  }
+
   // Unknown user or inactive subscription: treat as base tier
   if (!status || !status.is_active || status.tier === "base") {
     return (
@@ -126,12 +134,19 @@ export function createTierGateHooks(billing: BillingClient, logger: TierGateLogg
       return;
     }
 
-    const status = await billing.getStatus(userId);
-    const context = buildServiceContext(status);
+    const result = await billing.getStatus(userId);
+
+    if (!result.reachable) {
+      logger.warn(`[tier-gate] Billing API unreachable, failing open for user ${userId}`);
+      // Fail open: give full access context so the LLM doesn't restrict services
+      return { prependContext: buildServiceContext(undefined, true) };
+    }
+
+    const context = buildServiceContext(result.status, false);
 
     logger.info(
-      `[tier-gate] User ${userId}: tier=${status?.tier ?? "unknown"}, ` +
-      `gcal_gmail=${status?.gcal_gmail_status ?? "n/a"}`,
+      `[tier-gate] User ${userId}: tier=${result.status?.tier ?? "unknown"}, ` +
+      `gcal_gmail=${result.status?.gcal_gmail_status ?? "n/a"}`,
     );
 
     return { prependContext: context };
@@ -165,7 +180,17 @@ export function createTierGateHooks(billing: BillingClient, logger: TierGateLogg
       return;
     }
 
-    const status = await billing.getStatus(userId);
+    const result = await billing.getStatus(userId);
+
+    // Billing API unreachable — fail open, don't block tool calls
+    if (!result.reachable) {
+      logger.warn(
+        `[tier-gate] Billing API unreachable, failing open for ${targetAgent} (user ${userId})`,
+      );
+      return;
+    }
+
+    const status = result.status;
 
     // No status or inactive: block
     if (!status || !status.is_active || status.tier === "base") {

@@ -14,6 +14,12 @@ export type BillingStatus = {
   gcal_gmail_status: string | null;
 };
 
+/** Result wrapper that distinguishes "API down" from "user not found" */
+export type BillingResult = {
+  reachable: boolean;
+  status?: BillingStatus;
+};
+
 /** Cached billing status with TTL */
 type CachedStatus = {
   status: BillingStatus;
@@ -44,14 +50,14 @@ export class BillingClient {
   /**
    * Get the billing status for a Telegram user.
    *
-   * Returns cached result if available and fresh. On API failure,
-   * returns undefined (fail-open: caller should allow through).
+   * Returns a BillingResult with `reachable` flag so callers can
+   * distinguish "API down" (fail-open) from "user not found" (block).
    */
-  async getStatus(telegramUserId: string): Promise<BillingStatus | undefined> {
+  async getStatus(telegramUserId: string): Promise<BillingResult> {
     // Check cache first
     const cached = this.cache.get(telegramUserId);
     if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
-      return cached.status;
+      return { reachable: true, status: cached.status };
     }
 
     try {
@@ -66,23 +72,24 @@ export class BillingClient {
 
       if (!response.ok) {
         if (response.status === 404) {
-          // User not found — not an error, just no subscription
-          return undefined;
+          // User not found — API is reachable, user just has no subscription
+          return { reachable: true };
         }
         this.logger.warn(
           `[tier-gate] Billing API returned ${response.status} for user ${telegramUserId}`,
         );
-        return undefined;
+        // Non-404 server error: treat as unreachable (fail-open)
+        return { reachable: false };
       }
 
       const status = (await response.json()) as BillingStatus;
       this.cache.set(telegramUserId, { status, fetchedAt: Date.now() });
-      return status;
+      return { reachable: true, status };
     } catch (err) {
       this.logger.warn(
         `[tier-gate] Billing API unreachable: ${err instanceof Error ? err.message : String(err)}. Failing open.`,
       );
-      return undefined;
+      return { reachable: false };
     }
   }
 
