@@ -114,7 +114,9 @@ function buildServiceContext(status: BillingStatus | undefined, failOpen: boolea
   // Unknown tier: treat as free
   return (
     "Your available services for this user (Free tier): Notion and LinkedIn only. " +
-    "Do NOT offer or mention Gmail or Calendar."
+    "Do NOT offer or mention Gmail or Calendar. " +
+    "If the user asks about Gmail or Calendar, explain that these require the Pro subscription ($50/mo). " +
+    "Mention they can upgrade at " + BILLING_URL
   );
 }
 
@@ -161,7 +163,7 @@ export function createTierGateHooks(billing: BillingClient, logger: TierGateLogg
   /**
    * before_tool_call hook.
    *
-   * Blocks gated tool calls for base-tier users. Catches both:
+   * Blocks gated tool calls for free-tier users. Catches both:
    * - sessions_spawn calls targeting gated agents (gmail-agent, gcal-agent)
    * - Direct tool calls with gated prefixes (gmail_*, gcal_*)
    */
