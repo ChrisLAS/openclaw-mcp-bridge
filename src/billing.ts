@@ -29,6 +29,9 @@ type CachedStatus = {
 /** How long to cache billing status (5 minutes) */
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
+/** Max cache entries to prevent unbounded growth */
+const CACHE_MAX_SIZE = 1000;
+
 /** Timeout for billing API requests (5 seconds) */
 const BILLING_TIMEOUT_MS = 5_000;
 
@@ -54,10 +57,13 @@ export class BillingClient {
    * distinguish "API down" (fail-open) from "user not found" (block).
    */
   async getStatus(telegramUserId: string): Promise<BillingResult> {
-    // Check cache first
+    // Check cache first (delete if expired)
     const cached = this.cache.get(telegramUserId);
-    if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
-      return { reachable: true, status: cached.status };
+    if (cached) {
+      if (Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+        return { reachable: true, status: cached.status };
+      }
+      this.cache.delete(telegramUserId);
     }
 
     try {
@@ -82,7 +88,18 @@ export class BillingClient {
         return { reachable: false };
       }
 
-      const status = (await response.json()) as BillingStatus;
+      const body = await response.json();
+
+      // Validate required fields to avoid caching garbage
+      if (typeof body.is_active !== "boolean" || typeof body.tier !== "string") {
+        this.logger.warn(
+          `[tier-gate] Billing API returned malformed body for user ${telegramUserId}`,
+        );
+        return { reachable: false };
+      }
+
+      const status = body as BillingStatus;
+      this.evictIfFull();
       this.cache.set(telegramUserId, { status, fetchedAt: Date.now() });
       return { reachable: true, status };
     } catch (err) {
@@ -90,6 +107,24 @@ export class BillingClient {
         `[tier-gate] Billing API unreachable: ${err instanceof Error ? err.message : String(err)}. Failing open.`,
       );
       return { reachable: false };
+    }
+  }
+
+  /** Evict expired entries; if still full, drop oldest */
+  private evictIfFull(): void {
+    if (this.cache.size < CACHE_MAX_SIZE) return;
+
+    const now = Date.now();
+    for (const [key, entry] of this.cache) {
+      if (now - entry.fetchedAt >= CACHE_TTL_MS) {
+        this.cache.delete(key);
+      }
+    }
+
+    // Still full after expiry sweep — drop oldest entry (Map iterates in insertion order)
+    if (this.cache.size >= CACHE_MAX_SIZE) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest !== undefined) this.cache.delete(oldest);
     }
   }
 
