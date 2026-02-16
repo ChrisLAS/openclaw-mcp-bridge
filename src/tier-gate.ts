@@ -3,7 +3,7 @@
  *
  * Enforces per-user subscription tiers by querying the pal-e-billing API:
  * - before_agent_start: injects tier-appropriate service context into the system prompt
- * - before_tool_call: blocks sessions_spawn calls to gated agents for base-tier users
+ * - before_tool_call: blocks gated tool calls (sessions_spawn to gated agents + direct gmail/gcal tool calls)
  */
 
 import { BillingClient, type BillingStatus } from "./billing.js";
@@ -12,8 +12,11 @@ import { parseTelegramUserId } from "./session.js";
 /** Billing upgrade URL shown to users */
 const BILLING_URL = "https://ldraney.github.io/pal-e/billing";
 
-/** Agent names that require Pro tier */
+/** Agent names that require Pro tier (for sessions_spawn gating) */
 const GATED_AGENTS = new Set(["gmail-agent", "gcal-agent"]);
+
+/** Tool name prefixes that require Pro tier (for direct tool call gating) */
+const GATED_TOOL_PREFIXES = ["gmail_", "gcal_"];
 
 type TierGateLogger = {
   info: (msg: string) => void;
@@ -155,22 +158,28 @@ export function createTierGateHooks(billing: BillingClient, logger: TierGateLogg
   /**
    * before_tool_call hook.
    *
-   * Intercepts sessions_spawn calls that target gated agents (gmail-agent,
-   * gcal-agent) and blocks them if the user's tier doesn't allow it.
+   * Blocks gated tool calls for base-tier users. Catches both:
+   * - sessions_spawn calls targeting gated agents (gmail-agent, gcal-agent)
+   * - Direct tool calls with gated prefixes (gmail_*, gcal_*)
    */
   async function beforeToolCall(
     event: BeforeToolCallEvent,
     ctx: ToolHookContext,
   ): Promise<BeforeToolCallResult | void> {
-    // Only intercept sessions_spawn tool calls
-    if (event.toolName !== "sessions_spawn") {
-      return;
+    // Determine if this is a gated call
+    let gatedLabel: string | undefined;
+
+    if (event.toolName === "sessions_spawn") {
+      const targetAgent = extractTargetAgent(event.params);
+      if (targetAgent && GATED_AGENTS.has(targetAgent)) {
+        gatedLabel = targetAgent;
+      }
+    } else if (GATED_TOOL_PREFIXES.some((p) => event.toolName.startsWith(p))) {
+      gatedLabel = event.toolName;
     }
 
-    // Extract target agent from params
-    const targetAgent = extractTargetAgent(event.params);
-    if (!targetAgent || !GATED_AGENTS.has(targetAgent)) {
-      // Not targeting a gated agent — allow through
+    if (!gatedLabel) {
+      // Not a gated tool — allow through
       return;
     }
 
@@ -185,7 +194,7 @@ export function createTierGateHooks(billing: BillingClient, logger: TierGateLogg
     // Billing API unreachable — fail open, don't block tool calls
     if (!result.reachable) {
       logger.warn(
-        `[tier-gate] Billing API unreachable, failing open for ${targetAgent} (user ${userId})`,
+        `[tier-gate] Billing API unreachable, failing open for ${gatedLabel} (user ${userId})`,
       );
       return;
     }
@@ -195,7 +204,7 @@ export function createTierGateHooks(billing: BillingClient, logger: TierGateLogg
     // No status or inactive: block
     if (!status || !status.is_active || status.tier === "base") {
       logger.info(
-        `[tier-gate] Blocked ${targetAgent} for user ${userId} (tier: ${status?.tier ?? "none"})`,
+        `[tier-gate] Blocked ${gatedLabel} for user ${userId} (tier: ${status?.tier ?? "none"})`,
       );
       return {
         block: true,
@@ -208,7 +217,7 @@ export function createTierGateHooks(billing: BillingClient, logger: TierGateLogg
     // Pro tier but not active
     if (status.tier === "pro" && status.gcal_gmail_status !== "active") {
       logger.info(
-        `[tier-gate] Blocked ${targetAgent} for user ${userId} (gcal_gmail_status: ${status.gcal_gmail_status})`,
+        `[tier-gate] Blocked ${gatedLabel} for user ${userId} (gcal_gmail_status: ${status.gcal_gmail_status})`,
       );
       return {
         block: true,
@@ -249,5 +258,6 @@ export const __testing = {
   buildServiceContext,
   extractTargetAgent,
   GATED_AGENTS,
+  GATED_TOOL_PREFIXES,
   BILLING_URL,
 };

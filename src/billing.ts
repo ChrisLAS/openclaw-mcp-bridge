@@ -32,8 +32,20 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
 /** Max cache entries to prevent unbounded growth */
 const CACHE_MAX_SIZE = 1000;
 
+/** Shorter TTL for negative (404) cache entries (1 minute) */
+const NEGATIVE_CACHE_TTL_MS = 60 * 1000;
+
 /** Timeout for billing API requests (5 seconds) */
 const BILLING_TIMEOUT_MS = 5_000;
+
+/** Sentinel status cached for 404 (user not found) responses */
+const NOT_FOUND_STATUS: BillingStatus = {
+  is_active: false,
+  status: "not_found",
+  tier: "none",
+  email: null,
+  gcal_gmail_status: null,
+};
 
 type BillingLogger = {
   info: (msg: string) => void;
@@ -60,7 +72,8 @@ export class BillingClient {
     // Check cache first (delete if expired)
     const cached = this.cache.get(telegramUserId);
     if (cached) {
-      if (Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+      const ttl = cached.status === NOT_FOUND_STATUS ? NEGATIVE_CACHE_TTL_MS : CACHE_TTL_MS;
+      if (Date.now() - cached.fetchedAt < ttl) {
         return { reachable: true, status: cached.status };
       }
       this.cache.delete(telegramUserId);
@@ -78,8 +91,10 @@ export class BillingClient {
 
       if (!response.ok) {
         if (response.status === 404) {
-          // User not found — API is reachable, user just has no subscription
-          return { reachable: true };
+          // User not found — cache with short TTL to avoid hammering API
+          this.evictIfFull();
+          this.cache.set(telegramUserId, { status: NOT_FOUND_STATUS, fetchedAt: Date.now() });
+          return { reachable: true, status: NOT_FOUND_STATUS };
         }
         this.logger.warn(
           `[tier-gate] Billing API returned ${response.status} for user ${telegramUserId}`,
@@ -88,17 +103,26 @@ export class BillingClient {
         return { reachable: false };
       }
 
-      const body = await response.json();
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch {
+        this.logger.warn(
+          `[tier-gate] Billing API returned non-JSON response for user ${telegramUserId}`,
+        );
+        return { reachable: false };
+      }
 
       // Validate required fields to avoid caching garbage
-      if (typeof body.is_active !== "boolean" || typeof body.tier !== "string") {
+      const obj = body as Record<string, unknown>;
+      if (typeof obj.is_active !== "boolean" || typeof obj.tier !== "string") {
         this.logger.warn(
           `[tier-gate] Billing API returned malformed body for user ${telegramUserId}`,
         );
         return { reachable: false };
       }
 
-      const status = body as BillingStatus;
+      const status = obj as unknown as BillingStatus;
       this.evictIfFull();
       this.cache.set(telegramUserId, { status, fetchedAt: Date.now() });
       return { reachable: true, status };
