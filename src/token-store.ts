@@ -128,9 +128,17 @@ export class TokenStore {
 
     if (!row) return null;
 
+    let connected_services: string[];
+    try {
+      const parsed = JSON.parse(row.connected_services);
+      connected_services = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      connected_services = [];
+    }
+
     return {
       ...row,
-      connected_services: JSON.parse(row.connected_services),
+      connected_services,
     };
   }
 
