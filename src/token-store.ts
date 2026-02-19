@@ -149,46 +149,52 @@ export class TokenStore {
     this.db
       .prepare(
         `INSERT INTO user_profiles (telegram_user_id, email, display_name, tier)
-         VALUES (?, ?, ?, ?)
+         VALUES (?, ?, ?, COALESCE(?, 'free'))
          ON CONFLICT (telegram_user_id) DO UPDATE SET
            email = COALESCE(excluded.email, user_profiles.email),
            display_name = COALESCE(excluded.display_name, user_profiles.display_name),
            tier = COALESCE(excluded.tier, user_profiles.tier),
            updated_at = unixepoch()`,
       )
-      .run(userId, data.email ?? null, data.display_name ?? null, data.tier ?? "free");
+      .run(userId, data.email ?? null, data.display_name ?? null, data.tier ?? null);
   }
 
   addConnectedService(userId: string, service: string): void {
-    const profile = this.getProfile(userId);
-    if (profile) {
-      const services = profile.connected_services;
-      if (!services.includes(service)) {
-        services.push(service);
+    this.db.transaction(() => {
+      const profile = this.getProfile(userId);
+      if (profile) {
+        const services = profile.connected_services;
+        if (!services.includes(service)) {
+          services.push(service);
+          this.db
+            .prepare(
+              "UPDATE user_profiles SET connected_services = ?, updated_at = unixepoch() WHERE telegram_user_id = ?",
+            )
+            .run(JSON.stringify(services), userId);
+        }
+      } else {
         this.db
           .prepare(
-            "UPDATE user_profiles SET connected_services = ?, updated_at = unixepoch() WHERE telegram_user_id = ?",
+            `INSERT INTO user_profiles (telegram_user_id, connected_services) VALUES (?, ?)`,
           )
-          .run(JSON.stringify(services), userId);
+          .run(userId, JSON.stringify([service]));
       }
-    } else {
-      this.db
-        .prepare(
-          `INSERT INTO user_profiles (telegram_user_id, connected_services) VALUES (?, ?)`,
-        )
-        .run(userId, JSON.stringify([service]));
-    }
+    })();
   }
 
   removeConnectedService(userId: string, service: string): void {
-    const profile = this.getProfile(userId);
-    if (!profile) return;
+    this.db.transaction(() => {
+      const profile = this.getProfile(userId);
+      if (!profile) return;
 
-    const services = profile.connected_services.filter((s) => s !== service);
-    this.db
-      .prepare(
-        "UPDATE user_profiles SET connected_services = ?, updated_at = unixepoch() WHERE telegram_user_id = ?",
-      )
-      .run(JSON.stringify(services), userId);
+      const services = profile.connected_services.filter(
+        (s) => s !== service,
+      );
+      this.db
+        .prepare(
+          "UPDATE user_profiles SET connected_services = ?, updated_at = unixepoch() WHERE telegram_user_id = ?",
+        )
+        .run(JSON.stringify(services), userId);
+    })();
   }
 }
