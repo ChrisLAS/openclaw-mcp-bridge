@@ -1,0 +1,50 @@
+{
+  "id": "openclaw-mcp-bridge",
+  "name": "MCP Bridge",
+  "description": "Bridges MCP HTTP servers as native OpenClaw agent tools",
+  "version": "0.2.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "servers": {
+        "type": "array",
+        "description": "List of MCP servers to bridge",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Human-readable server name"
+            },
+            "url": {
+              "type": "string",
+              "description": "Base URL of the MCP HTTP server"
+            },
+            "prefix": {
+              "type": "string",
+              "description": "Prefix for tool names (e.g. 'freshrss' -> 'freshrss_list_feeds')"
+            },
+            "token": {
+              "type": "string",
+              "description": "Bearer token for authentication"
+            },
+            "tokenFile": {
+              "type": "string",
+              "description": "Path to file containing Bearer token (alternative to inline token)"
+            },
+            "path": {
+              "type": "string",
+              "description": "MCP endpoint path (defaults to '/mcp')"
+            }
+          },
+          "required": ["name", "url", "prefix"]
+        }
+      },
+      "timeout": {
+        "type": "number",
+        "description": "HTTP request timeout in ms (default: 30000)"
+      }
+    },
+    "required": ["servers"]
+  }
+}

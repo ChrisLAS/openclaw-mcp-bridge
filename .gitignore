@@ -1,0 +1,12 @@
+node_modules/
+dist/
+
+# Private development specs (contain local paths)
+openclaw-mcp-SPEC.md
+
+# Editor / IDE
+.cursor/
+.vscode/
+
+# Vitest cache
+.vite/
